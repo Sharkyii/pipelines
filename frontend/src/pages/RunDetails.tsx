@@ -1056,9 +1056,17 @@ class RunDetails extends Page<RunDetailsInternalProps, RunDetailsState> {
 
         selectedNodeDetails.phaseMessage =
           node && node.message
-            ? (isPodLifecycleFailure(node.message)
-                ? 'This step failed due to a Kubernetes pod issue, not an error in your pipeline code: '
-                : `This step is in ${node.phase} state with this message: `) + node.message
+            ? isStalled
+              ? // On a wedged step the raw Kubernetes text is the thing that made the
+                // run look inexplicable, and the cause/fix already say everything it
+                // said. On a step that genuinely failed it is still useful context, so
+                // that path keeps appending it.
+                `${podFailure!.category} issue (${podFailure!.reason}): ${podFailure!.cause} ${
+                  podFailure!.fix
+                }`
+              : (isPodLifecycleFailure(node.message)
+                  ? 'This step failed due to a Kubernetes pod issue, not an error in your pipeline code: '
+                  : `This step is in ${node.phase} state with this message: `) + node.message
             : undefined;
 
         selectedNodeDetails.phase = node.phase;

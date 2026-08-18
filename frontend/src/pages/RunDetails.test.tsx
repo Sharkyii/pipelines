@@ -28,7 +28,7 @@ import { Apis, JSONObject } from 'src/lib/Apis';
 import { ButtonKeys } from 'src/lib/Buttons';
 import * as MlmdUtils from 'src/mlmd/MlmdUtils';
 import { OutputArtifactLoader } from 'src/lib/OutputArtifactLoader';
-import { NodePhase } from 'src/lib/StatusUtils';
+import { classifyPodFailure, NodePhase } from 'src/lib/StatusUtils';
 import * as Utils from 'src/lib/Utils';
 import WorkflowParser from 'src/lib/WorkflowParser';
 import TestUtils, { flushPromisesInAct, testBestPractices } from 'src/TestUtils';
@@ -1106,6 +1106,25 @@ describe('RunDetails', () => {
     await waitFor(() => {
       expect(getRunDetailsState()?.sidepanelBannerMode).toBe('error');
     });
+  });
+
+  it('replaces the raw Kubernetes text for a wedged step', async () => {
+    testRun.pipeline_runtime!.workflow_manifest = stalledManifest(
+      'Pending',
+      'Back-off pulling image "python:99.99.99-nope": ImagePullBackOff',
+    );
+    await renderRunDetails();
+    await clickGraphNode('node1');
+    // Built from the classifier rather than hard-coded, so rewording a cause or
+    // fix doesn't break this test.
+    const classification = classifyPodFailure('ImagePullBackOff')!;
+    await waitFor(() => {
+      expect(getRunDetailsState()?.selectedNodeDetails).toHaveProperty(
+        'phaseMessage',
+        `Provisioning issue (ImagePullBackOff): ${classification.cause} ${classification.fix}`,
+      );
+    });
+    expect(getRunDetailsState()?.selectedNodeDetails?.phaseMessage).not.toContain('Back-off');
   });
 
   it('leaves the banner alone for a pending step with an ordinary message', async () => {
