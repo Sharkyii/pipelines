@@ -20,6 +20,7 @@ import {
   NodePhase,
   podFailureCategoryBgColors,
   PodFailureCategory,
+  PodFailureSeverity,
   statusBgColors,
   statusToBgColor,
 } from './StatusUtils';
@@ -136,6 +137,55 @@ describe('classifyPodFailure', () => {
       '0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims. Unschedulable',
     );
     expect(result?.reason).toBe('unbound immediate PersistentVolumeClaims');
+  });
+});
+
+describe('classifyPodFailure severity', () => {
+  // Severity answers a different question from category: not where the failure
+  // happened, but whether waiting it out can possibly help. Anything a human
+  // must change is BLOCKING; anything the cluster may still resolve by itself
+  // (capacity frees up, a GPU pool scales out, a registry recovers) is TRANSIENT.
+  const severities: Array<[string, PodFailureSeverity]> = [
+    ['ImagePullBackOff', PodFailureSeverity.BLOCKING],
+    ['ErrImagePull', PodFailureSeverity.TRANSIENT],
+    ['ErrImageNeverPull', PodFailureSeverity.BLOCKING],
+    ['InvalidImageName', PodFailureSeverity.BLOCKING],
+    ['Insufficient nvidia.com/gpu', PodFailureSeverity.TRANSIENT],
+    ['unbound immediate PersistentVolumeClaims', PodFailureSeverity.BLOCKING],
+    ['Unschedulable', PodFailureSeverity.TRANSIENT],
+    ['CrashLoopBackOff', PodFailureSeverity.BLOCKING],
+    ['OOMKilled', PodFailureSeverity.BLOCKING],
+    ['DeadlineExceeded', PodFailureSeverity.BLOCKING],
+    ['ContainerCannotRun', PodFailureSeverity.BLOCKING],
+    ['CreateContainerConfigError', PodFailureSeverity.BLOCKING],
+    ['CreateContainerError', PodFailureSeverity.BLOCKING],
+    ['RunContainerError', PodFailureSeverity.BLOCKING],
+    ['NodeLost', PodFailureSeverity.TRANSIENT],
+    ['Preempted', PodFailureSeverity.TRANSIENT],
+    ['PreemptionByScheduler', PodFailureSeverity.TRANSIENT],
+    ['Evicted', PodFailureSeverity.TRANSIENT],
+    ['TerminationByKubelet', PodFailureSeverity.TRANSIENT],
+  ];
+
+  it.each(severities)('classifies %j with severity %j', (reason, severity) => {
+    expect(classifyPodFailure(reason)!.severity).toBe(severity);
+  });
+
+  it('assigns a known severity to every pattern, and leaves category intact', () => {
+    severities.forEach(([reason]) => {
+      const result = classifyPodFailure(reason);
+      expect(result).toBeDefined();
+      expect(Object.values(PodFailureSeverity)).toContain(result!.severity);
+      expect(Object.values(PodFailureCategory)).toContain(result!.category);
+    });
+  });
+
+  it('keeps the more specific GPU pattern ahead of generic Unschedulable', () => {
+    const result = classifyPodFailure(
+      '0/5 nodes are available: 5 Insufficient nvidia.com/gpu. Unschedulable',
+    );
+    expect(result!.reason).toBe('Insufficient nvidia.com/gpu');
+    expect(result!.severity).toBe(PodFailureSeverity.TRANSIENT);
   });
 });
 

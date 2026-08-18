@@ -63,7 +63,13 @@ import CompareUtils from 'src/lib/CompareUtils';
 import { OutputArtifactLoader } from 'src/lib/OutputArtifactLoader';
 import RunUtils from 'src/lib/RunUtils';
 import { compareGraphEdges, KeyValue, transitiveReduction } from 'src/lib/StaticGraphParser';
-import { hasFinished, isPodLifecycleFailure, NodePhase } from 'src/lib/StatusUtils';
+import {
+  classifyPodFailure,
+  hasFinished,
+  isPodLifecycleFailure,
+  NodePhase,
+  PodFailureSeverity,
+} from 'src/lib/StatusUtils';
 import {
   decodeCompressedNodes,
   errorToMessage,
@@ -1040,11 +1046,27 @@ class RunDetails extends Page<RunDetailsInternalProps, RunDetailsState> {
     if (workflow && workflow.status && workflow.status.nodes && selectedNodeDetails) {
       const node = workflow.status.nodes[selectedNodeDetails.id];
       if (node) {
+        // A pod lifecycle condition holds a step in a non-terminal phase: it never
+        // fails, so it keeps rendering as an ordinary un-started step while
+        // Kubernetes has already recorded why it will not start.
+        const podFailure = classifyPodFailure(node.message);
+        const isStalled =
+          podFailure !== undefined &&
+          (node.phase === NodePhase.PENDING || node.phase === NodePhase.RUNNING);
+
         selectedNodeDetails.phaseMessage =
           node && node.message
-            ? (isPodLifecycleFailure(node.message)
-                ? 'This step failed due to a Kubernetes pod issue, not an error in your pipeline code: '
-                : `This step is in ${node.phase} state with this message: `) + node.message
+            ? isStalled
+              ? // On a wedged step the raw Kubernetes text is the thing that made the
+                // run look inexplicable, and the cause/fix already say everything it
+                // said. On a step that genuinely failed it is still useful context, so
+                // that path keeps appending it.
+                `${podFailure!.category} issue (${podFailure!.reason}): ${podFailure!.cause} ${
+                  podFailure!.fix
+                }`
+              : (isPodLifecycleFailure(node.message)
+                  ? 'This step failed due to a Kubernetes pod issue, not an error in your pipeline code: '
+                  : `This step is in ${node.phase} state with this message: `) + node.message
             : undefined;
 
         selectedNodeDetails.phase = node.phase;
@@ -1057,6 +1079,15 @@ class RunDetails extends Page<RunDetailsInternalProps, RunDetailsState> {
           default:
             sidepanelBannerMode = 'info';
             break;
+        }
+
+        // The switch only escalates on terminal failure, so a wedged step stays
+        // 'info' however bad the cause. Escalate by severity instead: a BLOCKING
+        // condition will not clear without someone intervening, so it is worth
+        // interrupting for; a TRANSIENT one still may, so it only warns.
+        if (isStalled) {
+          sidepanelBannerMode =
+            podFailure!.severity === PodFailureSeverity.BLOCKING ? 'error' : 'warning';
         }
       }
       this.setStateSafe({ selectedNodeDetails, sidepanelSelectedTab: tab, sidepanelBannerMode });

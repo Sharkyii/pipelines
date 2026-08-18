@@ -28,7 +28,7 @@ import { Apis, JSONObject } from 'src/lib/Apis';
 import { ButtonKeys } from 'src/lib/Buttons';
 import * as MlmdUtils from 'src/mlmd/MlmdUtils';
 import { OutputArtifactLoader } from 'src/lib/OutputArtifactLoader';
-import { NodePhase } from 'src/lib/StatusUtils';
+import { classifyPodFailure, NodePhase } from 'src/lib/StatusUtils';
 import * as Utils from 'src/lib/Utils';
 import WorkflowParser from 'src/lib/WorkflowParser';
 import TestUtils, { flushPromisesInAct, testBestPractices } from 'src/TestUtils';
@@ -1062,6 +1062,95 @@ describe('RunDetails', () => {
         'This step failed due to a Kubernetes pod issue, not an error in your pipeline code: OOMKilled',
       );
     });
+  });
+
+  const stalledManifest = (phase: string, message: string) =>
+    JSON.stringify({
+      metadata: { name: 'workflow1' },
+      status: {
+        nodes: { node1: { id: 'node1', name: 'node1', templateName: 'template1', phase, message } },
+      },
+    });
+
+  it('escalates the banner to error for a step wedged on a blocking condition', async () => {
+    testRun.pipeline_runtime!.workflow_manifest = stalledManifest(
+      'Pending',
+      'Back-off pulling image "python:99.99.99-nope": ImagePullBackOff',
+    );
+    await renderRunDetails();
+    await clickGraphNode('node1');
+    await waitFor(() => {
+      expect(getRunDetailsState()?.sidepanelBannerMode).toBe('error');
+    });
+  });
+
+  it('warns rather than errors for a stalled condition that may still clear', async () => {
+    testRun.pipeline_runtime!.workflow_manifest = stalledManifest(
+      'Pending',
+      '0/3 nodes are available: 3 Insufficient cpu. Unschedulable',
+    );
+    await renderRunDetails();
+    await clickGraphNode('node1');
+    await waitFor(() => {
+      expect(getRunDetailsState()?.sidepanelBannerMode).toBe('warning');
+    });
+  });
+
+  it('treats a Running step held on an image pull as wedged', async () => {
+    testRun.pipeline_runtime!.workflow_manifest = stalledManifest(
+      'Running',
+      'Back-off pulling image: ImagePullBackOff',
+    );
+    await renderRunDetails();
+    await clickGraphNode('node1');
+    await waitFor(() => {
+      expect(getRunDetailsState()?.sidepanelBannerMode).toBe('error');
+    });
+  });
+
+  it('replaces the raw Kubernetes text for a wedged step', async () => {
+    testRun.pipeline_runtime!.workflow_manifest = stalledManifest(
+      'Pending',
+      'Back-off pulling image "python:99.99.99-nope": ImagePullBackOff',
+    );
+    await renderRunDetails();
+    await clickGraphNode('node1');
+    // Built from the classifier rather than hard-coded, so rewording a cause or
+    // fix doesn't break this test.
+    const classification = classifyPodFailure('ImagePullBackOff')!;
+    await waitFor(() => {
+      expect(getRunDetailsState()?.selectedNodeDetails).toHaveProperty(
+        'phaseMessage',
+        `Provisioning issue (ImagePullBackOff): ${classification.cause} ${classification.fix}`,
+      );
+    });
+    expect(getRunDetailsState()?.selectedNodeDetails?.phaseMessage).not.toContain('Back-off');
+  });
+
+  it('leaves the banner alone for a pending step with an ordinary message', async () => {
+    testRun.pipeline_runtime!.workflow_manifest = stalledManifest('Pending', 'ContainerCreating');
+    await renderRunDetails();
+    await clickGraphNode('node1');
+    await waitFor(() => {
+      expect(getRunDetailsState()?.selectedNodeDetails).toHaveProperty(
+        'phaseMessage',
+        'This step is in Pending state with this message: ContainerCreating',
+      );
+    });
+    expect(getRunDetailsState()?.sidepanelBannerMode).toBe('info');
+  });
+
+  it('leaves a terminal pod lifecycle failure on the existing error banner', async () => {
+    testRun.pipeline_runtime!.workflow_manifest = stalledManifest('Failed', 'OOMKilled');
+    await renderRunDetails();
+    await clickGraphNode('node1');
+    await waitFor(() => {
+      expect(getRunDetailsState()?.sidepanelBannerMode).toBe('error');
+    });
+    expect(getRunDetailsState()?.selectedNodeDetails).toHaveProperty(
+      'phaseMessage',
+      'This step failed due to a Kubernetes pod issue, not an error in your pipeline code: OOMKilled',
+    );
   });
 
   it('dismisses node message banner if node loses message after refresh', async () => {
