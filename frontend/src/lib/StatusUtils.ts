@@ -26,6 +26,16 @@ export enum PodFailureCategory {
   NODE = 'Node',
 }
 
+// Whether a pod lifecycle condition can still clear without anyone intervening.
+// TRANSIENT conditions may resolve on their own (capacity frees up, a GPU node
+// pool scales out, a registry recovers); BLOCKING ones will not until someone
+// changes something. Categories say where a failure happened; severity says
+// whether waiting is pointless, which is a different question.
+export enum PodFailureSeverity {
+  TRANSIENT = 'Transient',
+  BLOCKING = 'Blocking',
+}
+
 export const statusBgColors = {
   error: '#fce8e6',
   notStarted: '#f7f7f7',
@@ -140,6 +150,7 @@ export function checkIfTerminated(status?: NodePhase, nodeMessage?: string): Nod
 interface PodFailurePattern {
   substring: string;
   category: PodFailureCategory;
+  severity: PodFailureSeverity;
   cause: string;
   fix: string;
 }
@@ -153,6 +164,7 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
   {
     substring: 'ImagePullBackOff',
     category: PodFailureCategory.PROVISIONING,
+    severity: PodFailureSeverity.BLOCKING,
     cause:
       "Kubernetes can't download your container image — wrong name/tag, a private registry, or the registry is down.",
     fix: 'Check the image name/tag on this component for typos, and confirm the image is public or the cluster has registry credentials.',
@@ -160,12 +172,14 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
   {
     substring: 'ErrImagePull',
     category: PodFailureCategory.PROVISIONING,
+    severity: PodFailureSeverity.TRANSIENT,
     cause: 'Same as above, but this is the first failed attempt rather than the repeated backoff.',
     fix: 'Same fix as ImagePullBackOff; this can also resolve itself on retry if it was a transient network blip.',
   },
   {
     substring: 'ErrImageNeverPull',
     category: PodFailureCategory.PROVISIONING,
+    severity: PodFailureSeverity.BLOCKING,
     cause:
       'The pod is set to never download the image and expects it to already exist on the machine.',
     fix: 'Remove any imagePullPolicy: Never setting unless the image is pre-loaded on every node.',
@@ -173,6 +187,7 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
   {
     substring: 'InvalidImageName',
     category: PodFailureCategory.PROVISIONING,
+    severity: PodFailureSeverity.BLOCKING,
     cause: 'The image reference itself is malformed, not a pull failure.',
     fix: 'Check base_image on the component for invalid characters or syntax.',
   },
@@ -181,6 +196,7 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
     // contains both substrings and the more specific one should win.
     substring: 'Insufficient nvidia.com/gpu',
     category: PodFailureCategory.PROVISIONING,
+    severity: PodFailureSeverity.TRANSIENT,
     cause:
       'No node in the cluster currently has a free GPU matching what this component requested.',
     fix: 'Check whether the requested GPU type or count actually exists in this cluster, or whether GPU node pool autoscaling is enabled.',
@@ -191,12 +207,14 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
     // "Unschedulable" the way a resource-capacity message does.
     substring: 'unbound immediate PersistentVolumeClaims',
     category: PodFailureCategory.PROVISIONING,
+    severity: PodFailureSeverity.BLOCKING,
     cause: 'This task references a PersistentVolumeClaim that has not been bound to storage yet.',
     fix: 'Check the PVC name and StorageClass this task references (for example through kubernetes.mount_pvc), and confirm the PVC exists and can be provisioned.',
   },
   {
     substring: 'Unschedulable',
     category: PodFailureCategory.PROVISIONING,
+    severity: PodFailureSeverity.TRANSIENT,
     cause:
       'No machine in the cluster currently has enough free CPU/memory/GPU for this task, or a placement rule excludes all of them.',
     fix: "Lower the component's requested cpu/memory/accelerator count, or ask a cluster admin for more capacity.",
@@ -204,6 +222,7 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
   {
     substring: 'CrashLoopBackOff',
     category: PodFailureCategory.RUNTIME,
+    severity: PodFailureSeverity.BLOCKING,
     cause:
       'Your container starts and then exits, repeatedly — almost always a bug that fires immediately on startup.',
     fix: 'Read the container logs for the exception/stack trace at startup; this is a code bug, not infrastructure.',
@@ -211,18 +230,21 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
   {
     substring: 'OOMKilled',
     category: PodFailureCategory.RUNTIME,
+    severity: PodFailureSeverity.BLOCKING,
     cause: 'Your code used more memory than the task was allowed.',
     fix: "Increase the component's memory request/limit, or reduce memory usage (smaller batch size, stream instead of loading everything at once).",
   },
   {
     substring: 'DeadlineExceeded',
     category: PodFailureCategory.RUNTIME,
+    severity: PodFailureSeverity.BLOCKING,
     cause: 'The task ran longer than its configured time limit.',
     fix: 'Increase the task/pipeline timeout, or investigate why this step is slower than expected.',
   },
   {
     substring: 'ContainerCannotRun',
     category: PodFailureCategory.RUNTIME,
+    severity: PodFailureSeverity.BLOCKING,
     cause:
       "The container runtime couldn't even start the container — a bad entrypoint/command or a permissions problem.",
     fix: "Verify the entrypoint/command in the component definition, and confirm the image's executable has run permissions.",
@@ -230,6 +252,7 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
   {
     substring: 'CreateContainerConfigError',
     category: PodFailureCategory.RUNTIME,
+    severity: PodFailureSeverity.BLOCKING,
     cause:
       "Usually means a referenced Kubernetes Secret or ConfigMap doesn't exist, or is missing an expected key.",
     fix: 'Check that any secret/configmap this task references actually exists in the target namespace.',
@@ -237,18 +260,21 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
   {
     substring: 'CreateContainerError',
     category: PodFailureCategory.RUNTIME,
+    severity: PodFailureSeverity.BLOCKING,
     cause: 'Low-level container setup failure — often a bad volume mount or security setting.',
     fix: 'Check any custom pod-spec patches applied via kfp-kubernetes (volumes, security context).',
   },
   {
     substring: 'RunContainerError',
     category: PodFailureCategory.RUNTIME,
+    severity: PodFailureSeverity.BLOCKING,
     cause: 'The container was created but the runtime failed to execute it.',
     fix: 'Usually an image build problem (missing shared library, wrong CPU architecture) — check the image build, not the component code.',
   },
   {
     substring: 'NodeLost',
     category: PodFailureCategory.NODE,
+    severity: PodFailureSeverity.TRANSIENT,
     cause:
       'The machine running your task disappeared from the cluster (crashed, or was reclaimed).',
     fix: 'Nothing to fix in your code — just retry. If this happens often, ask a cluster admin whether nodes are being reclaimed too aggressively (e.g. spot/preemptible policy).',
@@ -256,6 +282,7 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
   {
     substring: 'Preempted',
     category: PodFailureCategory.NODE,
+    severity: PodFailureSeverity.TRANSIENT,
     cause: 'A higher-priority workload needed the resources your task was using.',
     fix: 'Nothing wrong with your code; retry, or request a higher priority class for critical runs.',
   },
@@ -264,12 +291,14 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
     // "Preempted" describes from Argo's rendered node message.
     substring: 'PreemptionByScheduler',
     category: PodFailureCategory.NODE,
+    severity: PodFailureSeverity.TRANSIENT,
     cause: 'A higher-priority workload needed the resources your task was using.',
     fix: 'Nothing wrong with your code; retry, or request a higher priority class for critical runs.',
   },
   {
     substring: 'Evicted',
     category: PodFailureCategory.NODE,
+    severity: PodFailureSeverity.TRANSIENT,
     cause: 'The machine was low on memory/disk and Kubernetes removed your task to protect it.',
     fix: "Reduce the task's memory/disk footprint, or ask a cluster admin about node capacity.",
   },
@@ -278,6 +307,7 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
     // "Evicted" describes from Argo's rendered node message.
     substring: 'TerminationByKubelet',
     category: PodFailureCategory.NODE,
+    severity: PodFailureSeverity.TRANSIENT,
     cause: 'The machine was low on memory/disk and Kubernetes removed your task to protect it.',
     fix: "Reduce the task's memory/disk footprint, or ask a cluster admin about node capacity.",
   },
@@ -286,6 +316,7 @@ const POD_FAILURE_PATTERNS: PodFailurePattern[] = [
 export interface PodFailureClassification {
   category: PodFailureCategory;
   reason: string;
+  severity: PodFailureSeverity;
   cause: string;
   fix: string;
 }
@@ -304,6 +335,7 @@ export function classifyPodFailure(nodeMessage?: string): PodFailureClassificati
   return {
     category: pattern.category,
     reason: pattern.substring,
+    severity: pattern.severity,
     cause: pattern.cause,
     fix: pattern.fix,
   };
